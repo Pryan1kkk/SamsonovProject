@@ -1,11 +1,9 @@
 import { api, setSession } from '../api.js';
-import { h, field, select, notify } from '../util.js';
-
+import { h, field, select, notify, passwordInput } from '../util.js';
 function goHome(user) {
     const target = { client: '#/catalog', partner: '#/partner/listings', admin: '#/admin' }[user.role];
     location.hash = target;
 }
-
 function submitHandler(form, button, request) {
     return async (e) => {
         e.preventDefault();
@@ -21,35 +19,31 @@ function submitHandler(form, button, request) {
         }
     };
 }
-
 export async function login() {
     const button = h('button', { type: 'submit', class: 'primary' }, 'Войти');
     const form = h('form', {},
         field('Email', h('input', { name: 'email', type: 'email', required: true, autocomplete: 'username' })),
-        field('Пароль', h('input', { name: 'password', type: 'password', required: true, autocomplete: 'current-password' })),
+        field('Пароль', passwordInput({ name: 'password', required: true, autocomplete: 'current-password', maxLength: 100 })),
         button,
     );
     form.addEventListener('submit', submitHandler(form, button, (data) => api('POST', '/auth/login', data)));
-
     return h('div', { class: 'narrow' },
         h('h1', {}, 'Вход'),
         form,
         h('p', { class: 'hint' }, 'Нет аккаунта? ', h('a', { href: '#/register' }, 'Зарегистрируйтесь')),
     );
 }
-
 export async function register() {
     const button = h('button', { type: 'submit', class: 'primary' }, 'Зарегистрироваться');
     const form = h('form', {},
-        field('Имя или название проката', h('input', { name: 'name', required: true })),
+        field('Имя или название проката', h('input', { name: 'name', required: true, maxLength: 100 })),
         field('Email', h('input', { name: 'email', type: 'email', required: true })),
         field('Телефон', h('input', { name: 'phone', type: 'tel' })),
-        field('Пароль (не короче 6 символов)', h('input', { name: 'password', type: 'password', required: true, minLength: 6 })),
+        field('Пароль (не короче 6 символов)', passwordInput({ name: 'password', required: true, minLength: 6, maxLength: 100, autocomplete: 'new-password' })),
         field('Я хочу', select('role', [['client', 'арендовать снаряжение'], ['partner', 'сдавать снаряжение']], 'client')),
         button,
     );
     form.addEventListener('submit', submitHandler(form, button, (data) => api('POST', '/auth/register', data)));
-
     return h('div', { class: 'narrow' },
         h('h1', {}, 'Регистрация'),
         form,

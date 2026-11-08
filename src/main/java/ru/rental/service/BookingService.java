@@ -1,5 +1,4 @@
 package ru.rental.service;
-
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -11,28 +10,21 @@ import ru.rental.repo.DisputeRepository;
 import ru.rental.repo.ListingRepository;
 import ru.rental.repo.UserRepository;
 import ru.rental.web.ApiException;
-
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
-
 @Service
 @RequiredArgsConstructor
 public class BookingService {
-
     private final BookingRepository bookings;
     private final ListingRepository listings;
     private final UserRepository users;
     private final DisputeRepository disputes;
     private final NotificationService notifications;
-
     @Value("${app.deposit-percent:30}")
     private int depositPercent;
-
-    // ================= Клиент =================
-
     @Transactional
     public BookingDto create(User me, BookingRequest r) {
         LocalDate from = r.dateFrom();
@@ -43,7 +35,13 @@ public class BookingService {
         if (from.isBefore(LocalDate.now())) {
             throw ApiException.badRequest("Нельзя бронировать на прошедшие даты");
         }
-        Listing listing = listings.findById(r.listingId())
+        if (from.isAfter(LocalDate.now().plusYears(1))) {
+            throw ApiException.badRequest("Бронировать можно не дальше чем на год вперёд");
+        }
+        if (java.time.temporal.ChronoUnit.DAYS.between(from, to) >= 60) {
+            throw ApiException.badRequest("Максимальный срок аренды — 60 суток");
+        }
+        Listing listing = listings.lockById(r.listingId())
                 .orElseThrow(() -> ApiException.notFound("Объявление не найдено"));
         if (listing.getStatus() != ListingStatus.ACTIVE) {
             throw ApiException.badRequest("Это объявление сейчас недоступно для бронирования");
@@ -51,12 +49,10 @@ public class BookingService {
         if (bookings.countOverlapping(listing.getId(), BookingStatus.BLOCKING, from, to, 0L) > 0) {
             throw ApiException.conflict("На эти даты снаряжение уже занято");
         }
-
-        long days = ChronoUnit.DAYS.between(from, to) + 1; // даты включительно
+        long days = ChronoUnit.DAYS.between(from, to) + 1;
         BigDecimal total = listing.getPricePerDay().multiply(BigDecimal.valueOf(days));
         BigDecimal deposit = total.multiply(BigDecimal.valueOf(depositPercent))
                 .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-
         Booking b = new Booking();
         b.setListing(listing);
         b.setClient(me);
@@ -66,17 +62,14 @@ public class BookingService {
         b.setTotalPrice(total);
         b.setDeposit(deposit);
         bookings.save(b);
-
         notifications.send(listing.getPartner(), "Новая заявка №" + b.getId() + " на «" + listing.getTitle()
-                + "» с " + from + " по " + to);
+                + "» с " + from + " по " + to, "#/partner/bookings?b=" + b.getId());
         return BookingDto.from(b);
     }
-
     @Transactional(readOnly = true)
     public List<BookingDto> ofClient(User me) {
         return bookings.findByClientIdOrderByIdDesc(me.getId()).stream().map(BookingDto::from).toList();
     }
-
     @Transactional(readOnly = true)
     public BookingDto get(User me, Long id) {
         Booking b = find(id);
@@ -88,7 +81,6 @@ public class BookingService {
         }
         return BookingDto.from(b);
     }
-
     @Transactional
     public BookingDto cancel(User me, Long id) {
         Booking b = find(id);
@@ -97,11 +89,10 @@ public class BookingService {
             throw ApiException.badRequest("Отменить можно только заявку в статусе pending или confirmed");
         }
         b.setStatus(BookingStatus.CANCELLED);
-        b.setPaid(false); // если было оплачено — считаем, что деньги возвращены
-        notifications.send(b.getListing().getPartner(), "Клиент отменил бронирование №" + b.getId());
+        b.setPaid(false);
+        notifications.send(b.getListing().getPartner(), "Клиент отменил бронирование №" + b.getId(), "#/partner/bookings?b=" + b.getId());
         return BookingDto.from(b);
     }
-
     @Transactional
     public BookingDto pay(User me, Long id) {
         Booking b = find(id);
@@ -113,10 +104,9 @@ public class BookingService {
             throw ApiException.conflict("Бронирование уже оплачено");
         }
         b.setPaid(true);
-        notifications.send(b.getListing().getPartner(), "Бронирование №" + b.getId() + " оплачено клиентом");
+        notifications.send(b.getListing().getPartner(), "Бронирование №" + b.getId() + " оплачено клиентом", "#/partner/bookings?b=" + b.getId());
         return BookingDto.from(b);
     }
-
     @Transactional(readOnly = true)
     public List<BookingDto> ofPartner(User me, BookingStatus status) {
         return bookings.findByListingPartnerIdOrderByIdDesc(me.getId()).stream()
@@ -124,32 +114,45 @@ public class BookingService {
                 .map(BookingDto::from)
                 .toList();
     }
-
+    @Transactional(readOnly = true)
+    public PartnerStatsDto partnerStats(User me) {
+        List<Booking> mine = bookings.findByListingPartnerIdOrderByIdDesc(me.getId());
+        BigDecimal earned = mine.stream()
+                .filter(b -> b.isPaid() && b.getStatus() != BookingStatus.CANCELLED)
+                .map(Booking::getTotalPrice)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        Double rating = users.findById(me.getId()).map(User::getRating).orElse(null);
+        return new PartnerStatsDto(
+                listings.findByPartnerIdOrderByIdDesc(me.getId()).size(),
+                mine.stream().filter(b -> b.getStatus() == BookingStatus.PENDING).count(),
+                mine.stream().filter(b -> b.getStatus() == BookingStatus.ACTIVE).count(),
+                mine.stream().filter(b -> b.getStatus() == BookingStatus.COMPLETED).count(),
+                earned,
+                rating);
+    }
     @Transactional
     public BookingDto confirm(User me, Long id) {
         Booking b = find(id);
         requirePartner(b, me);
         requireStatus(b, BookingStatus.PENDING);
-        // На момент подтверждения даты могли занять другой заявкой
+        listings.lockById(b.getListing().getId());
         if (bookings.countOverlapping(b.getListing().getId(), BookingStatus.BLOCKING,
                 b.getDateFrom(), b.getDateTo(), b.getId()) > 0) {
             throw ApiException.conflict("На эти даты уже есть подтверждённое бронирование");
         }
         b.setStatus(BookingStatus.CONFIRMED);
-        notifications.send(b.getClient(), "Заявка №" + b.getId() + " подтверждена. Оплатите бронирование.");
+        notifications.send(b.getClient(), "Заявка №" + b.getId() + " подтверждена. Оплатите бронирование.", "#/my-bookings?b=" + b.getId());
         return BookingDto.from(b);
     }
-
     @Transactional
     public BookingDto reject(User me, Long id) {
         Booking b = find(id);
         requirePartner(b, me);
         requireStatus(b, BookingStatus.PENDING);
         b.setStatus(BookingStatus.CANCELLED);
-        notifications.send(b.getClient(), "Заявка №" + b.getId() + " отклонена партнёром");
+        notifications.send(b.getClient(), "Заявка №" + b.getId() + " отклонена партнёром", "#/my-bookings?b=" + b.getId());
         return BookingDto.from(b);
     }
-
     @Transactional
     public BookingDto issue(User me, Long id) {
         Booking b = find(id);
@@ -160,16 +163,14 @@ public class BookingService {
         }
         b.setStatus(BookingStatus.ACTIVE);
         notifications.send(b.getClient(), "Снаряжение по бронированию №" + b.getId() + " выдано. Не забудьте вернуть до "
-                + b.getDateTo());
+                + b.getDateTo(), "#/my-bookings?b=" + b.getId());
         return BookingDto.from(b);
     }
-
     @Transactional
     public BookingDto returned(User me, Long id, ReturnRequest r) {
         Booking b = find(id);
         requirePartner(b, me);
         requireStatus(b, BookingStatus.ACTIVE);
-
         if (r != null && r.damaged()) {
             b.setStatus(BookingStatus.DISPUTED);
             Dispute d = new Dispute();
@@ -179,31 +180,27 @@ public class BookingService {
             d.setStatus(DisputeStatus.OPEN);
             disputes.save(d);
             users.findByRole(Role.ADMIN).forEach(a ->
-                    notifications.send(a, "Новый спор по бронированию №" + b.getId()));
-            notifications.send(b.getClient(), "По бронированию №" + b.getId() + " открыт спор: " + d.getDescription());
+                    notifications.send(a, "Новый спор по бронированию №" + b.getId(), "#/admin?tab=disputes"));
+            notifications.send(b.getClient(), "По бронированию №" + b.getId() + " открыт спор: " + d.getDescription(), "#/my-bookings?b=" + b.getId());
         } else {
             b.setStatus(BookingStatus.COMPLETED);
-            notifications.send(b.getClient(), "Бронирование №" + b.getId() + " завершено. Оставьте отзыв!");
+            notifications.send(b.getClient(), "Бронирование №" + b.getId() + " завершено. Оставьте отзыв!", "#/my-bookings?b=" + b.getId());
         }
         return BookingDto.from(b);
     }
-
     private Booking find(Long id) {
         return bookings.findById(id).orElseThrow(() -> ApiException.notFound("Бронирование не найдено"));
     }
-
     private void requireClient(Booking b, User me) {
         if (!b.getClient().getId().equals(me.getId())) {
             throw ApiException.forbidden("Это не ваше бронирование");
         }
     }
-
     private void requirePartner(Booking b, User me) {
         if (!b.getListing().getPartner().getId().equals(me.getId())) {
             throw ApiException.forbidden("Это бронирование не по вашему объявлению");
         }
     }
-
     private void requireStatus(Booking b, BookingStatus expected) {
         if (b.getStatus() != expected) {
             throw ApiException.badRequest("Действие недоступно: статус бронирования — "

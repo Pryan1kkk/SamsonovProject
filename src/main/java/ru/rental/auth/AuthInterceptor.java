@@ -1,5 +1,4 @@
 package ru.rental.auth;
-
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
@@ -10,21 +9,16 @@ import org.springframework.web.servlet.HandlerInterceptor;
 import ru.rental.model.User;
 import ru.rental.service.AuthService;
 import ru.rental.web.ApiException;
-
 import java.util.Arrays;
-
 @Component
 @RequiredArgsConstructor
 public class AuthInterceptor implements HandlerInterceptor {
-
     private final AuthService authService;
-
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
         if (!(handler instanceof HandlerMethod hm)) {
-            return true; // статические ресурсы, Swagger и т.п.
+            return true;
         }
-
         User user = null;
         String header = request.getHeader("Authorization");
         if (header != null && header.startsWith("Bearer ")) {
@@ -33,13 +27,12 @@ public class AuthInterceptor implements HandlerInterceptor {
         if (user != null) {
             CurrentUser.set(user);
         }
-
         Auth auth = hm.getMethodAnnotation(Auth.class);
         if (auth == null) {
             auth = hm.getBeanType().getAnnotation(Auth.class);
         }
         if (auth == null) {
-            return true; // публичный эндпоинт
+            return true;
         }
         if (user == null) {
             throw new ApiException(HttpStatus.UNAUTHORIZED, "Требуется авторизация: передайте заголовок Authorization: Bearer <token>");
@@ -49,7 +42,6 @@ public class AuthInterceptor implements HandlerInterceptor {
         }
         return true;
     }
-
     @Override
     public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) {
         CurrentUser.clear();
